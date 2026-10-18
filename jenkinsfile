@@ -1,0 +1,100 @@
+
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'ap-south-1'
+        ECR_REPOSITORY = 'my-java-app'
+        IMAGE_TAG = "${BUILD_NUMBER}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                echo 'Downloading source code from GitHub'
+                checkout scm
+            }
+        }
+
+        stage('Check Tools') {
+            steps {
+                sh '''
+                    echo "Checking installed tools"
+                    java -version
+                    mvn -version
+                    docker --version
+                    aws --version
+                '''
+            }
+        }
+
+        stage('Build') {
+            steps {
+                echo 'Building Java application'
+                sh 'mvn clean package -DskipTests'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running unit tests'
+                sh 'mvn test'
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                echo 'Building Docker image'
+                sh '''
+                    docker build \
+                      -t ${ECR_REPOSITORY}:${IMAGE_TAG} .
+                '''
+            }
+        }
+
+        stage('Push to Amazon ECR') {
+            steps {
+                withAWS(region: "${AWS_REGION}") {
+                    sh '''
+                        ACCOUNT_ID=$(aws sts get-caller-identity \
+                          --query Account --output text)
+
+                        ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}"
+
+                        aws ecr get-login-password \
+                          --region "${AWS_REGION}" |
+                        docker login \
+                          --username AWS \
+                          --password-stdin \
+                          "${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+                        docker tag \
+                          "${ECR_REPOSITORY}:${IMAGE_TAG}" \
+                          "${ECR_URI}:${IMAGE_TAG}"
+
+                        docker push "${ECR_URI}:${IMAGE_TAG}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed. Check the console output.'
+        }
+        always {
+            echo 'Pipeline execution finished.'
+        }
+    }
+}
